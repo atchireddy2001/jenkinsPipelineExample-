@@ -3,79 +3,47 @@ def COLOR_MAP = [
     'FAILURE': 'danger',
 ]
 
-pipeline
-{
+pipeline {
     agent any
-    tools
-    {
-        maven 'MAVEN3'
-        jdk 'OracleJDK11'
+    environment {
+        registryCredential = 'ecr:us-east-1:awscreds'
+        appRegistry = "446720548167.dkr.ecr.us-east-1.amazonaws.com/vprofileappimg"
+        vprofileRegistry = "https://446720548167.dkr.ecr.us-east-1.amazonaws.com"
+        cluster = "vprofile"
+        service = "vprofileappService"
     }
-    
-    //environment{
+  stages {
+    stage('Fetch code'){
+      steps {
+        git branch: 'docker', url: 'https://github.com/devopshydclub/vprofile-project.git'
+      }
+    }
 
-    //}
 
-    stages
-    {
-        stage('Fetching code from GIT')
-        {
-            steps
-            {
-                git branch: 'main', url: 'https://github.com/hkhcoder/vprofile-project.git'
-            }
-        }
+    stage('Test'){
+      steps {
+        sh 'mvn test'
+      }
+    }
 
-        stage('Building app & Post step Archiving war file of build')
-        {
-            steps
-            {
-                sh 'mvn install -DskipTests'
-            }
-
-            post
-            {
-                success
-                {
-                     archiveArtifacts artifacts: '**/*.war'
-                }
-            }
-        }
-
-        stage('JUnit Testing')
-        {
-            steps
-            {
-                sh 'mvn test'
-            }
-        }
-
-        stage('CODE_ANALYSIS -- using checkstyle')
-        {
-            steps
-            {
+    stage ('Code Analysis With CHECKSTYLE'){
+            steps {
                 sh 'mvn checkstyle:checkstyle'
             }
-            post
-            {
-                success
-                {
-                    echo 'Generated checkstyle results now you can check for directoiry in workshop'
+            post {
+                success {
+                    echo 'Generated Analysis Result successfullyyy'
                 }
             }
         }
 
-        stage('CODE_ANALYSIS -- using SonarScanner & uploading junit jacaco checkstyle results into sonar')
-        {
-            environment
-            {
-                scannerHome = tool 'sonar4.7'   //sonarQube scanner tool name configured in tools section
-            }
-            steps 
-            {
-                withSonarQubeEnv('sonarServer') 
-                {
-                    sh '''${scannerHome}/bin/sonar-scanner -Dsonar.projectKey=vprofile \
+        stage('SonarQube analysis') {
+            environment {
+             scannerHome = tool 'sonar4.7'
+          }
+            steps {
+                withSonarQubeEnv('sonarServer') {
+                 sh '''${scannerHome}/bin/sonar-scanner -Dsonar.projectKey=vprofile \
                    -Dsonar.projectName=vprofile-repo \
                    -Dsonar.projectVersion=1.0 \
                    -Dsonar.sources=src/ \
@@ -87,49 +55,53 @@ pipeline
             }
         }
 
-        stage('Quality gate - config in sonar server')
-        {
-            steps
-            {
-                timeout(time: 10, unit: 'MINUTES') 
-                {
-                     waitForQualityGate abortPipeline: true
+        stage("Quality Gate") {
+            steps {
+                timeout(time: 10, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
                 }
             }
-            
         }
 
-        stage('Uploading Artifact in Nexus repo')
-        {
-            steps
-            {
-                nexusArtifactUploader(
-                    nexusVersion: 'nexus3',
-                    protocol: 'http',
-                    nexusUrl: '172.31.93.138:8081',
-                    groupId: 'Sample',
-                    version: "${env.BUILD_ID}_${env.BUILD_TIMESTAMP}",
-                    repository: 'vprofile-repo',
-                    credentialsId: 'credfornexus',
-                    artifacts: [
-                        [artifactId: 'vprofileApp', 
-                        file: 'target/vprofile-v2.war',
-                        type: 'war']
-                    ]
-                )
-            }
-        }
+    stage('Build App Image') {
+       steps {
+       
+         script {
+                dockerImage = docker.build( appRegistry + ":$BUILD_NUMBER", "./Docker-files/app/multistage/")
+             }
 
+     }
+    
     }
 
-    post
-    {
-        always{
+    stage('Upload App Image') {
+          steps{
+            script {
+              docker.withRegistry( vprofileRegistry, registryCredential ) {
+                dockerImage.push("$BUILD_NUMBER")
+                dockerImage.push('latest')
+              }
+            }
+          }
+     }
+     
+     stage('Deploy to ecs') {
+          steps {
+        withAWS(credentials: 'awscreds', region: 'us-east-1') {
+          sh 'aws ecs update-service --cluster ${cluster} --service ${service} --force-new-deployment'
+        }
+      }
+     }
+
+  }
+  
+  post{
+      always{
             echo 'SLACK Notification'
             slackSend channel: '#cicdjenkinsnotification',
                 color: COLOR_MAP[currentBuild.currentResult],
-                message: "*${currentBuild.currentResult}:* Job ${env.JOB_NAME} build ${env.BUILD_NUMBER} \n More info at: ${env.BUILD_URL}"
+                message: "*${currentBuild.currentResult}:* Job: ${env.JOB_NAME} buildNo: ${env.BUILD_NUMBER} \n More info at: ${env.BUILD_URL}"
         }
-    }
-
+  }
+  
 }
